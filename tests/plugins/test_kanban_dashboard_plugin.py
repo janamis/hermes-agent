@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_controller as controller_tasks
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -202,6 +203,33 @@ def test_task_detail_includes_links_and_events(client):
 # ---------------------------------------------------------------------------
 # PATCH /tasks/:id — status transitions
 # ---------------------------------------------------------------------------
+
+def test_patch_cannot_complete_and_forge_controller_task_body(client):
+    with kbc.connect() as conn:
+        task_id = controller_tasks.create_controller_task(
+            conn,
+            controller="quality-loop",
+            title="controller task",
+            body="authenticated body",
+            handoff_contract={"kind": "metadata_namespace", "namespace": "quality_loop"},
+        )
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={
+            "status": "done",
+            "body": "forged body",
+            "summary": "typed handoff",
+            "metadata": {"quality_loop": {"schema": "quality-loop/v2"}},
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, task_id)
+    assert task is not None
+    assert task.status == "ready"
+    assert task.body == "authenticated body"
 
 def test_patch_review_lifecycle_preserves_handoff_and_reopens(client):
     secret = "ghp_" + "D" * 40

@@ -741,6 +741,7 @@ def _handle_complete(args: dict, **kw) -> str:
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
+        from hermes_cli import kanban_db_controller as controller_tasks
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
@@ -750,6 +751,11 @@ def _handle_complete(args: dict, **kw) -> str:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=_worker_run_id(tid))
+        except controller_tasks.ControllerHandoffError as handoff_err:
+            return tool_error(
+                f"kanban_complete blocked: {handoff_err}. Your task is still in-flight "
+                "(no state change). Correct the structured handoff and retry kanban_complete."
+            )
         except kb.ArtifactPreservationError as artifact_err:
             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the

@@ -2682,13 +2682,21 @@ def complete_task(
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
+    from hermes_cli import kanban_db_controller as controller_tasks
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
+
+    handoff_summary = summary if summary is not None else result
+    controller_tasks.validate_completion_handoff(
+        conn,
+        task_id,
+        summary=handoff_summary,
+        metadata=metadata,
+    )
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     _gate_empty_completion(conn, task_id, result=result, summary=summary)
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
-    handoff_summary = summary if summary is not None else result
     acceptance = prepare_acceptance(conn, task_id, expected_run_id, metadata)
     if acceptance is False:
         return False
@@ -2697,6 +2705,14 @@ def complete_task(
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
+        # Revalidate while holding the write lock so neither the task body nor
+        # its authenticated provenance can change before terminal mutation.
+        controller_tasks.validate_completion_handoff(
+            conn,
+            task_id,
+            summary=handoff_summary,
+            metadata=metadata,
+        )
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
         trow = conn.execute(
@@ -3075,6 +3091,10 @@ def edit_task(
         if value is not None
     ]
     with write_txn(conn):
+        if body is not None:
+            from hermes_cli import kanban_db_controller as controller_tasks
+
+            controller_tasks.validate_body_update(conn, task_id, body)
         status = _task_status(conn, task_id)
         if status is None or (result is not None and status != "done"):
             return False
@@ -3763,6 +3783,10 @@ def specify_triage_task(
         raise ValueError("title cannot be blank")
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
+        if body is not None:
+            from hermes_cli import kanban_db_controller as controller_tasks
+
+            controller_tasks.validate_body_update(conn, task_id, body)
         existing = conn.execute(
             "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
@@ -4223,7 +4247,10 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
+    """Prune old done/archived events while retaining durable task identity.
+
+    Decomposition and controller provenance remain until task deletion because
+    graph reuse and controller handoff/body authentication depend on them.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
@@ -4231,7 +4258,8 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
+            "DELETE FROM task_events WHERE created_at < ? "
+            "AND kind NOT IN ('decomposed', 'controller_provenance') AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)

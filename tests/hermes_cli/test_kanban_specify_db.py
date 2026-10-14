@@ -9,6 +9,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_controller as controller_tasks
 
 
 @pytest.fixture
@@ -58,6 +59,24 @@ def test_specify_rejects_blank_title(kanban_home):
         tid = _create_triage(conn, title="rough")
     with kbc.connect() as conn, pytest.raises(ValueError):
         kb.specify_triage_task(conn, tid, title="   ", body="ok")
+
+
+def test_specify_cannot_mutate_controller_task_body(kanban_home):
+    with kbc.connect() as conn:
+        tid = controller_tasks.create_controller_task(
+            conn,
+            controller="quality-loop",
+            title="controller triage",
+            body="authenticated body",
+            triage=True,
+            handoff_contract={"kind": "metadata_namespace", "namespace": "quality_loop"},
+        )
+        with pytest.raises(ValueError, match="body is immutable"):
+            kb.specify_triage_task(conn, tid, body="forged body")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "triage"
+        assert task.body == "authenticated body"
 
 
 def test_specify_records_audit_comment_only_when_author_given(kanban_home):

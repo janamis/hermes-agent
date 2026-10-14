@@ -10,6 +10,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_controller as controller_tasks
 from hermes_cli import kanban_ops
 
 @pytest.fixture
@@ -48,6 +49,36 @@ def test_gc_events_rejects_negative_window(board):
         with pytest.raises(ValueError, match="older_than_seconds"):
             kb.gc_events(conn, older_than_seconds=-86400)
         assert _event_rows(conn, tid) > 0
+
+
+def test_gc_events_preserves_controller_provenance(board):
+    with kbc.connect_closing() as conn:
+        tid = controller_tasks.create_controller_task(
+            conn,
+            controller="quality-loop",
+            title="retained provenance",
+            body="authenticated body",
+            handoff_contract={"kind": "metadata_namespace", "namespace": "quality_loop"},
+        )
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="typed handoff",
+            metadata={"quality_loop": {"schema": "quality-loop/v2"}},
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET created_at=0 WHERE task_id=?", (tid,))
+
+        kb.gc_events(conn, older_than_seconds=1)
+
+        events = kb.list_events(conn, tid)
+        assert [event.kind for event in events] == [controller_tasks.PROVENANCE_EVENT_KIND]
+        assert controller_tasks.handoff_contract(conn, tid) == {
+            "kind": "metadata_namespace",
+            "namespace": "quality_loop",
+        }
+        with pytest.raises(ValueError, match="body is immutable"):
+            kb.edit_task(conn, tid, body="forged body")
 
 def test_gc_worker_logs_rejects_negative_window(board):
     log = _old_log_file()

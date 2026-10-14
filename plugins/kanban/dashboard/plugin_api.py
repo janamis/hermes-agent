@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
+from hermes_cli import kanban_db_controller as controller_tasks
 from hermes_cli import kanban_workflow
 from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli import kanban_db_connect as kbc
@@ -671,6 +672,8 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
     """PATCH title/body phase: one UPDATE + ``edited`` event, then the post-commit observer
     (field names only — values never leave the DB via this payload)."""
     with kanban_db.write_txn(conn):
+        if payload.body is not None:
+            controller_tasks.validate_body_update(conn, task_id, payload.body)
         sets, vals = [], []
         if payload.title is not None:
             if not payload.title.strip():
@@ -693,6 +696,9 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
+        if payload.body is not None:
+            with _map_errors(400, ValueError):
+                controller_tasks.validate_body_update(conn, task_id, payload.body)
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
